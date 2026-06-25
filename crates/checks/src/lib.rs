@@ -1,8 +1,9 @@
 //! Vulnerability detectors for Soroban smart contracts.
 
 pub mod admin;
+pub mod annotations;
 pub mod auth;
-pub mod division;
+pub mod global_state;
 pub mod hardcoded_address;
 pub mod overflow;
 pub mod panics;
@@ -10,12 +11,13 @@ pub mod reentrancy;
 pub mod std_imports;
 pub mod storage;
 pub mod ttl;
-pub mod zero_address;
+pub mod xc_input;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
+pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
-pub use division::IntegerDivisionTruncationCheck;
+pub use global_state::MutableGlobalStateCheck;
 pub use hardcoded_address::HardcodedAddressCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use panics::PanicInContractCheck;
@@ -23,7 +25,7 @@ pub use reentrancy::ReentrancyRiskCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 pub use ttl::MissingTtlExtensionCheck;
-pub use zero_address::MissingZeroAddressCheck;
+pub use xc_input::UnsafeCrossContractInputCheck;
 
 use serde::Serialize;
 use syn::File;
@@ -49,6 +51,9 @@ pub struct Finding {
     /// Link to the check's documentation section (exposed in `--json` output for dashboard integrations).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_url: Option<String>,
+    /// One-liner fix hint shown in pretty output and included in `--json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 /// A static analyzer check implemented against a parsed `syn::File`.
@@ -71,9 +76,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(MissingTtlExtensionCheck),
         Box::new(ForbiddenStdImportsCheck),
         Box::new(HardcodedAddressCheck),
-        Box::new(ReentrancyRiskCheck),
-        Box::new(IntegerDivisionTruncationCheck),
-        Box::new(PanicInContractCheck),
-        Box::new(MissingZeroAddressCheck),
+        Box::new(UnsafeCrossContractInputCheck),
+        Box::new(MissingContractAnnotationCheck),
     ]
 }

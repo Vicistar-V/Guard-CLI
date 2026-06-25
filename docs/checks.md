@@ -17,7 +17,7 @@ In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl
 
 **Why it matters**
 
-Contract state updates should be gated. This rule only recognizes `env.require_auth()`, not `user.require_auth()` or `env.require_auth_for_args()`.
+Contract state updates should be gated. This rule recognizes both `env.require_auth()` and `env.require_auth_for_args(…)` as valid auth gates.
 
 **Limitations**
 
@@ -28,7 +28,7 @@ Contract state updates should be gated. This rule only recognizes `env.require_a
 
 ---
 
-## `unchecked-arithmetic` (Medium)
+## `unchecked-arithmetic` (High / Medium / Low)
 
 **Status:** Phase 2
 
@@ -39,13 +39,21 @@ Inside `#[contractimpl]` methods:
 - Binary `+`, `-`, `*` where **both** sides are not integer/string literals (so `1 + 2` is ignored, `a + b` is flagged).
 - Compound `+=`, `-=`, `*=` (syn 2 represents these as `ExprBinary` with `AddAssign` / `SubAssign` / `MulAssign`).
 
+**Severity heuristic (name-based)**
+
+| Operand name contains | Severity |
+|---|---|
+| `amount`, `balance`, `fee`, `price`, `supply`, `reward`, `stake`, `fund`, `value`, `total` | **High** |
+| `idx`, `index`, `count`, `len`, `offset`, `pos`, `step`, or single-char `i/j/k/n/x/y/z` | **Low** |
+| anything else | **Medium** |
+
 **Why it matters**
 
 Wrapping arithmetic on `i128` / `u128` amounts can silently overflow. Prefer `checked_*` or `saturating_*` for token math.
 
 **Limitations**
 
-- May flag harmless loop indices; review context.
+- Heuristic is purely name-based; review context before acting on Low findings.
 - Does not analyze types; it is syntactic.
 
 **Fixture:** `test-contracts/arithmetic-vulnerable/`, `test-contracts/arithmetic-safe/`
@@ -96,90 +104,42 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 
 ---
 
-## `reentrancy-risk` (High)
+## `unsafe-cross-contract-input` (High)
 
 **Status:** Phase 3
 
 **What it detects**
 
-Inside `#[contractimpl]` methods, any call to `invoke_contract` or `invoke_contract_check` that occurs **after** a storage write (`set`, `remove`, `extend_ttl`, `bump`, `append`) and **before** a subsequent storage read (which would indicate the developer re-checked state after the call).
+In `#[contractimpl]` methods: a local binding assigned from `invoke_contract(…)` that flows directly into `env.storage().*.set(…, &binding)` without any intervening validation (no `if`, `match`, `unwrap_or*`, `ok_or*`, or `checked_*` expression between the binding and the storage write).
 
 **Why it matters**
 
-Soroban's cross-contract call API allows calling untrusted contracts. If state has been mutated before the call, the callee can observe or re-enter the contract in an intermediate state. The checks-effects-interactions pattern (write last, or re-read state) eliminates the risk.
+Cross-contract call return values are externally influenced. Writing them to persistent ledger storage without validation can corrupt contract state or enable injection attacks.
 
 **Limitations**
 
-- Purely sequential within a single method body; does not follow helper calls.
-- A storage read anywhere after the write clears the flag regardless of whether it covers the written key.
+- Binding-level taint only; multi-step transformations that preserve the raw value are not tracked.
+- Validation done inside a helper function is not visible to this check.
 
-**Fixture:** `test-contracts/reentrancy-vulnerable/`, `test-contracts/reentrancy-safe/`
+**Fixture:** tests in `crates/checks/src/xc_input.rs`
 
 ---
 
-## `integer-division-truncation` (Medium)
+## `missing-contract-annotation` (Low)
 
 **Status:** Phase 3
 
 **What it detects**
 
-Inside `#[contractimpl]` methods, binary `/` where **at least one operand is not an integer literal**, and `/=` compound assignments. Literal-only expressions such as `6 / 2` are ignored.
+A file containing a `#[contractimpl]` (or `#[soroban_sdk::contractimpl]`) `impl` block but no `#[contract]` struct in the same file.
 
 **Why it matters**
 
-Integer division silently truncates towards zero. In token arithmetic this can cause value to be drained: `1_000_001 / 2` returns `500_000`, losing one unit. Prefer `checked_div` or explicit rounding logic when the result must be exact.
+The Soroban SDK requires a `#[contract]` struct to be present alongside `#[contractimpl]`. A mismatch is almost always a copy-paste error and will produce a compile error or unexpected runtime behaviour.
 
 **Limitations**
 
-- Syntactic only; does not track operand types.
-- May flag intentional floor division; treat as a review signal.
+- File-scoped only; does not resolve cross-file references.
+- Only `#[contract]` on a `struct` item is recognized.
 
-**Fixture:** `test-contracts/division-vulnerable/`, `test-contracts/division-safe/`
-
----
-
-## `panic-in-contract` (Medium)
-
-**Status:** Phase 3
-
-**What it detects**
-
-Inside `#[contractimpl]` methods:
-
-- `.unwrap()` and `.expect(…)` method calls.
-- `panic!(…)` and `unreachable!()` macro invocations.
-
-**Why it matters**
-
-`panic!` and its equivalents abort the transaction with an unhelpful, opaque error. Prefer `env.panic_with_error` (typed SDK errors) or returning a `Result` with a descriptive error type so callers receive actionable feedback.
-
-**Limitations**
-
-- Flags all `unwrap` / `expect` calls regardless of whether the `Option` / `Result` can actually be `None` / `Err` at runtime.
-- Does not distinguish `unwrap_or`, `unwrap_or_default`, etc. (those are not flagged).
-
-**Fixture:** `test-contracts/panic-vulnerable/`, `test-contracts/panic-safe/`
-
----
-
-## `missing-zero-address-check` (Medium)
-
-**Status:** Phase 3
-
-**What it detects**
-
-Public `#[contractimpl]` methods whose name matches a set of sensitive admin/ownership entrypoints (e.g. `set_owner`, `set_admin`, `initialize`, `transfer_ownership`, …) that:
-
-1. Accept at least one `Address` parameter, **and**
-2. Do not contain any of: `require_auth`, an `assert!` / `require!` macro, or a call whose name contains `zero`, `default`, `check_address`, `assert`, or `validate`.
-
-**Why it matters**
-
-Passing a zero or default `Address` to an admin function can permanently lock the contract if there is no recovery path. A simple non-zero guard at the entry point prevents this.
-
-**Limitations**
-
-- Name-list heuristic; extend `SENSITIVE_NAMES` in `crates/checks/src/zero_address.rs` for custom entrypoint names.
-- Any matching call name clears the finding regardless of whether it actually validates the address value.
-
-**Fixture:** `test-contracts/zero-address-vulnerable/`, `test-contracts/zero-address-safe/`
+**Fixture:** tests in `crates/checks/src/annotations.rs`
