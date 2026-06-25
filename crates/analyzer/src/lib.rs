@@ -18,23 +18,56 @@ pub enum ScanError {
 }
 
 /// Recursively scan `.rs` files under `root` and aggregate findings from every check.
-pub fn scan_directory(root: &Path) -> Result<Vec<Finding>, ScanError> {
+///
+/// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
+/// file's path relative to `root`; matching files are skipped entirely.
+pub fn scan_directory(root: &Path, excludes: &[String]) -> Result<Vec<Finding>, ScanError> {
     let root = root.canonicalize()?;
+    let exclude_patterns: Vec<glob::Pattern> = excludes
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect();
     let checks = default_checks();
+    let mut findings = Vec::new();
 
-    let entries: Vec<_> = WalkDir::new(&root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|entry| {
-            if !entry.file_type().is_file() {
-                return false;
-            }
-            let path = entry.path();
-            if path
-                .components()
-                .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
-            {
-                return false;
+    for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path
+            .components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
+        {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+
+        let file_label = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        if exclude_patterns
+            .iter()
+            .any(|p| p.matches(&file_label) || p.matches_path(path))
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+
+        for check in &checks {
+            let mut from_check = check.run(&syn_file, &content);
+            for f in &mut from_check {
+                f.file_path = file_label.clone();
             }
             path.extension().and_then(|s| s.to_str()) == Some("rs")
         })
